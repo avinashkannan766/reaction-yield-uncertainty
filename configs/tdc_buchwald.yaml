@@ -1,0 +1,81 @@
+# TDC Buchwald-Hartwig yield dataset (Yields task). The downloaded file has 3,955 reactions
+# (15 aryl halides x 4 ligands x 3 bases x ~22 additives; 1 amine, 1 Pd precatalyst) - the
+# well-known Ahneman-style HTE set, NOT a 55k-reaction set (verified from the cleaning report).
+# 1) Download buchwald-hartwig.pkl (TDC: Yields / 'Buchwald-Hartwig'; Harvard Dataverse file id 6175640)
+#    into data/raw/tdc_buchwald/
+# 2) python -m chemyield.run --config configs/tdc_buchwald.yaml --force-clean
+#    The cleaning report (data/processed/tdc_buchwald/cleaning_report.md) shows what was removed.
+# 3) If the adapter reports an unrecognised layout, set reactant_col / product_col / yield_col below.
+dataset:
+  name: tdc_buchwald
+  adapter: tdc_pickle
+  params:
+    path: data/raw/tdc_buchwald/buchwald-hartwig.pkl
+    # real layout [ID, X(dict: product/catalyst/reactant), Y] is auto-detected; override only if needed
+
+cleaning:
+  yield_scale: auto               # real file stores yields as fractions (0-1): auto-detected, logged
+  element_balance: flag
+  dedupe: mean
+  # The real file gives ONE dot-joined 'reactant' string (halide, amine, Pd precatalyst, ligand,
+  # base, additive all mixed). These SMARTS rules split it into roles; FIRST match wins.
+  # Check 'role signatures' in the cleaning report: each reaction should have 1 of each role.
+  role_rules:
+    - {role: catalyst,    smarts: "[Pd,Ni,Cu,Pt,Rh,Ru,Ir,Fe]"}
+    - {role: ligand,      smarts: "[PX3]"}                          # P(III) phosphines (XPhos family)
+    - {role: base,        smarts: "[#15]=[#7]"}                     # phosphazene bases (P2Et ...)
+    - {role: base,        smarts: "[NX2;!a]=[CX3]([#7])"}           # guanidine / amidine bases
+    - {role: aryl_halide, smarts: "c[Cl,Br,I]"}
+    - {role: amine,       smarts: "[NX3;H2,H1;!$(NC=O)]"}
+    - {role: additive,    smarts: "[n,o,s]"}                        # heteroaromatic additives
+
+split: {kind: random, test_size: 0.2}
+seeds: [0, 1, 2]
+conformal: {alpha: 0.1}
+
+features:
+  - {name: morgan, radius: 2, n_bits: 512}
+model: {name: lightgbm}
+
+benchmark:
+  splits:
+    - {kind: random}
+    - {kind: group, group_by: scaffold, test_size: 0.2}       # unseen product scaffolds
+    - {kind: group, group_by: "role:aryl_halide", test_size: 0.2}   # unseen aryl halides
+    - {kind: group, group_by: "role:additive", test_size: 0.2}      # unseen additives
+    # same groups, but validation (early stopping) and calibration (conformal) are ALSO whole unseen groups
+    - {kind: group, group_by: "role:aryl_halide", test_size: 0.2, val_by_group: true}
+    - {kind: group, group_by: "role:additive", test_size: 0.2, val_by_group: true}
+    # 4 ligands / 3 bases are too few for a 20% test set -> leave-one-out: each fold holds out ONE
+    # whole ligand (seeds 0-3) or base (seeds 0-2). Per-fold R2 is listed in results/*_benchmark.md.
+    - {kind: loo, group_by: "role:ligand", seeds: [0, 1, 2, 3]}
+    - {kind: loo, group_by: "role:base", seeds: [0, 1, 2]}
+    # group-K-fold conformal: calibration residuals come from K refits of the TRAIN data that each hold
+    # out whole groups (cal rows go back into training). Works where val_by_group cannot (few groups).
+    - {kind: group, group_by: scaffold, test_size: 0.2, conformal: {method: group_kfold, k: 4}}
+    - {kind: group, group_by: "role:aryl_halide", test_size: 0.2, conformal: {method: group_kfold, k: 5}}
+    - {kind: group, group_by: "role:additive", test_size: 0.2, conformal: {method: group_kfold, k: 5}}
+    - {kind: loo, group_by: "role:ligand", seeds: [0, 1, 2, 3], conformal: {method: group_kfold, k: 3}}
+    - {kind: loo, group_by: "role:base", seeds: [0, 1, 2], conformal: {method: group_kfold, k: 2}}
+experiments:
+  - {name: mean_baseline, features: [], model: {name: mean}}
+  - {name: ridge_morgan, model: {name: ridge}}
+  - {name: rf_morgan, model: {name: rf}}
+  - {name: lgbm_morgan, model: {name: lightgbm}}
+  - {name: lgbm_ensemble5_morgan, model: {name: lightgbm, n_models: 5}}
+  - name: lgbm_morgan_desc
+    features: [{name: morgan, n_bits: 512}, {name: rdkit_desc}]
+    model: {name: lightgbm}
+  - name: mpnn_ensemble3
+    features: []
+    model: {name: mpnn, n_models: 3, epochs: 40, patience: 8}
+  # --- GNN diagnostics (all with the product graph OFF: the product is fixed by halide + amine) ---
+  - name: mpnn_noproduct               # does dropping the redundant product graph help OOD?
+    features: []
+    model: {name: mpnn, n_models: 3, epochs: 40, patience: 8, product: false}
+  - name: id_embed_noproduct           # same net, NO chemistry: learned vector per molecule
+    features: []
+    model: {name: mpnn, encoder: id, n_models: 3, epochs: 40, patience: 8, product: false}
+  - name: mpnn_transformer_noproduct   # components attend to each other (interaction-aware)
+    features: []
+    model: {name: mpnn, interaction: transformer, n_models: 3, epochs: 40, patience: 8, product: false}

@@ -1,0 +1,48 @@
+# SYNTHETIC data: pipeline smoke test only. Yields are invented - ignore the numbers chemically.
+dataset:
+  name: synthetic_bh
+  adapter: csv
+  params:
+    path: data/raw/synthetic/synthetic_bh.csv
+    id_col: id
+    yield_col: yield
+    product_col: product
+    role_cols: {aryl_halide: aryl_halide, amine: amine, ligand: ligand, base: base, solvent: solvent}
+    keep_cols: [temperature]
+
+cleaning: {}                      # defaults; see chemyield/cleaning.py
+
+split: {kind: group, group_by: "role:ligand", test_size: 0.25}
+seeds: [0, 1, 2]
+conformal: {alpha: 0.1}
+
+features:
+  - {name: morgan, radius: 2, n_bits: 256}
+model: {name: lightgbm}
+
+benchmark:
+  splits:
+    - {kind: random}
+    - {kind: group, group_by: "role:aryl_halide", test_size: 0.2}
+    # same groups, but validation (early stopping) and calibration (conformal) are ALSO whole unseen groups
+    - {kind: group, group_by: "role:aryl_halide", test_size: 0.2, val_by_group: true}
+    - {kind: loo, group_by: "role:ligand", seeds: [0, 1, 2, 3]}
+experiments:
+  - {name: mean_baseline, features: [], model: {name: mean}}
+  - {name: ridge_morgan, model: {name: ridge}}
+  - {name: lgbm_morgan, model: {name: lightgbm}}
+  - name: lgbm_morgan_desc_cond
+    features:
+      - {name: morgan, n_bits: 256}
+      - {name: rdkit_desc}
+      - {name: conditions, numeric_cols: [temperature]}
+    model: {name: lightgbm}
+  - name: mpnn
+    features: [{name: conditions, numeric_cols: [temperature]}]
+    model: {name: mpnn, epochs: 25, patience: 6}
+  - name: id_embed
+    features: []
+    model: {name: mpnn, encoder: id, epochs: 15, patience: 5, n_models: 2}
+  - name: mpnn_transformer
+    features: []
+    model: {name: mpnn, interaction: transformer, epochs: 15, patience: 5, n_models: 2}

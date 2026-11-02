@@ -1,0 +1,49 @@
+# TDC USPTO yields (Lowe's patent reactions, CC0 per TDC's page): 853,638 reactions, atom-mapped,
+# text-mined yields. File: Harvard Dataverse file id 4186956 (uspto_yields.pkl, ~430 MB), saved as
+#   data/raw/uspto/uspto_yields.pkl
+# Layout is [ID, X, Y], X = {catalyst, reactant, product}. The 'catalyst' key is NOT only catalysts
+# (the first row has dichloromethane there), so it is renamed to role 'agent'. Inside 'reactant',
+# fragments with atom maps are real reactants; unmapped ones (AlCl3 ions, ...) become 'agent' too.
+#
+# PROFILE BEFORE COMMITTING (raw rows are subsampled first; cleaning canonicalises every SMILES):
+#   python -m chemyield.profile --config configs/uspto_yields.yaml --sample 20000 \
+#          --group-by scaffold product "role:agent" --out results/uspto_profile.md
+dataset:
+  name: uspto_yields
+  adapter: tdc_pickle
+  params:
+    path: data/raw/uspto/uspto_yields.pkl
+    atom_map_roles: true
+    unmapped_role: agent
+    role_renames: {catalyst: agent}
+  sample: {n: 50000, seed: 0}     # random subset of the RAW rows (the full file is slow on a laptop CPU)
+
+cleaning:
+  yield_scale: fraction           # the file stores fractions (median 0.69); outliers like -1 and 693.65
+                                  # fall outside [-5, 105] % and are dropped by the range step
+  element_balance: flag
+  dedupe: mean
+
+# ---- benchmark (tree models only: ~45k rows x several molecules is slow for the graph model on CPU) ----
+split: {kind: random, test_size: 0.2}
+seeds: [0, 1, 2]
+conformal: {alpha: 0.1}
+features:
+  - {name: morgan, radius: 2, n_bits: 512}
+model: {name: lightgbm}
+
+benchmark:
+  splits:
+    - {kind: random}
+    # Structure-based groups are near-singletons in this dataset (median group size 1), so unseen
+    # chemistry is defined by k-means clusters of product fingerprints. Check cluster sizes first:
+    #   python -m chemyield.profile --config configs/uspto_yields.yaml --sample 50000 --group-by cluster:100 cluster:300
+    - {kind: group, group_by: "cluster:100", test_size: 0.2}
+    - {kind: group, group_by: "cluster:100", test_size: 0.2, val_by_group: true}
+    - {kind: group, group_by: "cluster:100", test_size: 0.2, conformal: {method: group_kfold, k: 4}}
+experiments:
+  - {name: mean_baseline, features: [], model: {name: mean}}
+  - {name: ridge_morgan, model: {name: ridge}}
+  - {name: rf_morgan, model: {name: rf, n_estimators: 100, max_features: 0.1, min_samples_leaf: 3}}
+  - {name: lgbm_morgan, model: {name: lightgbm}}
+  - {name: lgbm_ensemble5_morgan, model: {name: lightgbm, n_models: 5}}
